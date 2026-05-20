@@ -71,6 +71,15 @@ _REGISTRY: dict[str, BenchmarkSpec] = {
     # --- Multi-hop QA ---
     "2wikimultihopqa":    _rag("2wikimultihopqa"),
     "hotpotqa":           _rag("hotpotqa"),
+    "hotpotqa_random_1":  BenchmarkSpec("hotpotqa", "qdata_hotpotqa.pkl", "mdata_hotpotqa_random_1.pkl"),
+    "hotpotqa_random_2":  BenchmarkSpec("hotpotqa", "qdata_hotpotqa.pkl", "mdata_hotpotqa_random_2.pkl"),
+    "hotpotqa_random_5":  BenchmarkSpec("hotpotqa", "qdata_hotpotqa.pkl", "mdata_hotpotqa_random_5.pkl"),
+    "hotpotqa_bm25_1":    BenchmarkSpec("hotpotqa", "qdata_hotpotqa.pkl", "mdata_hotpotqa_bm25_1.pkl"),
+    "hotpotqa_bm25_2":    BenchmarkSpec("hotpotqa", "qdata_hotpotqa.pkl", "mdata_hotpotqa_bm25_2.pkl"),
+    "hotpotqa_bm25_5":    BenchmarkSpec("hotpotqa", "qdata_hotpotqa.pkl", "mdata_hotpotqa_bm25_5.pkl"),
+    "hotpotqa_echo_1":    BenchmarkSpec("hotpotqa", "qdata_hotpotqa.pkl", "mdata_hotpotqa_echo_1.pkl"),
+    "hotpotqa_echo_2":    BenchmarkSpec("hotpotqa", "qdata_hotpotqa.pkl", "mdata_hotpotqa_echo_2.pkl"),
+    "hotpotqa_echo_5":    BenchmarkSpec("hotpotqa", "qdata_hotpotqa.pkl", "mdata_hotpotqa_echo_5.pkl"),
     "musique":            _rag("musique"),
     # --- HippoRAG ---
     "hipporag_narrative": _rag_0108("hipporag_narrative"),

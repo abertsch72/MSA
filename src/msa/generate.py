@@ -218,45 +218,71 @@ class MSAGenerationMixin(GenerationMixin):
                         else:
                             source_context_list.append("")
 
-                source_batch = tokenizer(
-                    source_context_list,
-                    padding="longest",
-                    truncation=True,
-                    return_tensors="pt",
-                    add_special_tokens=True,
-                    padding_side="left",
-                )
-
-                sh = source_batch['input_ids'].shape
-
-                batch_source_input_ids = source_batch['input_ids'].clone().detach().long().to(input_ids.device)
-                batch_source_attn_mask = source_batch['attention_mask'].clone().detach().long().to(input_ids.device)
-                batch_source_doc_ids = torch.zeros_like(source_batch['input_ids'], dtype=torch.long, device=input_ids.device)
-                batch_source_position_ids = torch.arange(sh[1], dtype=torch.long, device=input_ids.device).unsqueeze(0).expand(sh[0], -1)
-                batch_source_position_ids = batch_source_position_ids + model_inputs['position_ids'] + torch.sum(batch_source_attn_mask, dim=1, keepdim=True) - sh[1] + 1
-
-                input_ids = batch_source_input_ids
-                model_kwargs['attention_mask'] = batch_source_attn_mask
-                model_kwargs['doc_ids'] = batch_source_doc_ids
-                model_kwargs['position_ids'] = batch_source_position_ids
-                source_context_copied = True
-
-                cur_len += sh[1]
-                this_peer_finished = False
-                del outputs
-                is_first = 1
-                inner_string = ["" for _ in range(batch_size)]
-
-                if generate_stage == 2:
-                    round_end = True
-
-                if generate_stage == 2:
-                    generate_stage = 1
-
-                if generate_stage == 3:
+                # Guard: if stage 3 produced all-empty source contexts (every sequence hit the
+                # length cap without generating <End-of-Retrieve>), the tokenizer would return
+                # shape (bsz, 0), causing the next forward pass to receive q_len=0 and crash.
+                # Skip the injection and advance to stage 4 instead.
+                if generate_stage == 3 and not any(source_context_list):
+                    logger.warning(
+                        "\n" + "!" * 80 + "\n"
+                        "WARNING: generate_stage=3 skipped — all %d sequences hit the retrieval\n"
+                        "length cap (>1000 chars) without producing <End-of-Retrieve>.\n"
+                        "source_context_list is entirely empty; skipping source injection to\n"
+                        "avoid a q_len=0 forward pass crash. Advancing to stage 4.\n"
+                        + "!" * 80,
+                        batch_size,
+                    )
+                    del outputs
+                    inner_string = ["" for _ in range(batch_size)]
                     generate_stage = 4
+                    round_end_flags = torch.zeros(batch_size, dtype=torch.bool, device=last_valid_inputs.device)
+                    # _update_model_kwargs_for_generation already appended a column to
+                    # attention_mask (making it (bsz, 2)) before we decided to skip.
+                    # Without this reset, the next iteration computes position_ids via
+                    # `pos[:, -1:] + mask` which broadcasts (bsz,1)+(bsz,2) → (bsz,2).
+                    # That gives key_states seq_len=2 but value_states seq_len=1 after
+                    # rotary embedding, crashing SDPA with key.size(1) != value.size(1).
+                    model_kwargs["attention_mask"] = torch.ones(batch_size, 1, dtype=torch.long, device=last_valid_inputs.device)
+                else:
+                    source_batch = tokenizer(
+                        source_context_list,
+                        padding="longest",
+                        truncation=True,
+                        return_tensors="pt",
+                        add_special_tokens=True,
+                        padding_side="left",
+                    )
 
-                round_end_flags = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
+                    sh = source_batch['input_ids'].shape
+
+                    batch_source_input_ids = source_batch['input_ids'].clone().detach().long().to(input_ids.device)
+                    batch_source_attn_mask = source_batch['attention_mask'].clone().detach().long().to(input_ids.device)
+                    batch_source_doc_ids = torch.zeros_like(source_batch['input_ids'], dtype=torch.long, device=input_ids.device)
+                    batch_source_position_ids = torch.arange(sh[1], dtype=torch.long, device=input_ids.device).unsqueeze(0).expand(sh[0], -1)
+                    batch_source_position_ids = batch_source_position_ids + model_inputs['position_ids'] + torch.sum(batch_source_attn_mask, dim=1, keepdim=True) - sh[1] + 1
+
+                    input_ids = batch_source_input_ids
+                    model_kwargs['attention_mask'] = batch_source_attn_mask
+                    model_kwargs['doc_ids'] = batch_source_doc_ids
+                    model_kwargs['position_ids'] = batch_source_position_ids
+                    source_context_copied = True
+
+                    cur_len += sh[1]
+                    this_peer_finished = False
+                    del outputs
+                    is_first = 1
+                    inner_string = ["" for _ in range(batch_size)]
+
+                    if generate_stage == 2:
+                        round_end = True
+
+                    if generate_stage == 2:
+                        generate_stage = 1
+
+                    if generate_stage == 3:
+                        generate_stage = 4
+
+                    round_end_flags = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
 
             else:
                 input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)

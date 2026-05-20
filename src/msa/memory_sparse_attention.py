@@ -217,14 +217,25 @@ class MemorySparseAttention(Qwen3Attention):
             value_states = repeat_kv(value_states, self.num_key_value_groups)
             
             attn_output = torch.zeros((bsz, q_len, self.config.num_attention_heads * self.head_dim), device=device, dtype=dtype)
-            indices_b = torch.nonzero(doc_token_mask, as_tuple=False)
-            
+
+            # Include context tokens (doc_id < -2) alongside doc tokens so each (context, doc)
+            # pair attends causally as one sequence via flash_attn_varlen_func — same masking
+            # strategy used elsewhere in this function.  Context tokens have doc_id = -(doc_idx+3),
+            # so abs(id)-2 == doc_idx+1 == the paired doc's positive id (group_id).
+            context_token_mask = (doc_ids < -2) & (attention_mask == 1)
+            both_mask = doc_token_mask | context_token_mask
+            indices_b = torch.nonzero(both_mask, as_tuple=False)
+
             if indices_b.shape[0] > 0:
-                q_b, k_b, v_b = query_states[indices_b[:, 0], :, indices_b[:, 1]], key_states[indices_b[:, 0], :, indices_b[:, 1]], value_states[indices_b[:, 0], :, indices_b[:, 1]]
+                q_b = query_states[indices_b[:, 0], :, indices_b[:, 1]]
+                k_b = key_states[indices_b[:, 0], :, indices_b[:, 1]]
+                v_b = value_states[indices_b[:, 0], :, indices_b[:, 1]]
                 doc_ids_b = doc_ids[indices_b[:, 0], indices_b[:, 1]]
                 batch_indices_b = indices_b[:, 0]
-                global_doc_ids_b = batch_indices_b * (max_doc_id + 1) + doc_ids_b
-                _, counts_b = torch.unique_consecutive(global_doc_ids_b, return_counts=True)
+                # Map negative context ids to the same group as their paired doc
+                group_ids_b = torch.where(doc_ids_b > 0, doc_ids_b, -doc_ids_b - 2)
+                global_group_ids_b = batch_indices_b * (max_doc_id + 1) + group_ids_b
+                _, counts_b = torch.unique_consecutive(global_group_ids_b, return_counts=True)
                 cu_seqlens_b = F.pad(torch.cumsum(counts_b, dim=0, dtype=torch.int32), (1, 0))
                 output_b_flat = flash_attn_varlen_func(q_b, k_b, v_b, cu_seqlens_q=cu_seqlens_b, cu_seqlens_k=cu_seqlens_b, max_seqlen_q=int(counts_b.max()), max_seqlen_k=int(counts_b.max()), dropout_p=self.attention_dropout if self.training else 0.0, causal=True).view(-1, self.config.num_attention_heads * self.head_dim)
                 attn_output[indices_b[:, 0], indices_b[:, 1]] += output_b_flat
