@@ -176,7 +176,9 @@ class GenerateStub:
 class Document:
     doc: str = ""
     doc_id: int = 0
-    num_chunks: int = 0
+    num_chunks: int = 0       # doc-only chunks stored in the memory store
+    context: str = ""         # shared context prepended during encoding
+    n_context_chunks: int = 0 # leading chunks produced by context prefix; stripped before storage
 
 @dataclass
 class BlockModelInput:
@@ -1470,7 +1472,7 @@ class MSAEngine:
         for doc in docs:
             bucket_idx = next_bucket()
             bucket_docs[bucket_idx].append(doc)
-            bucket_chunk_count[bucket_idx] += doc.num_chunks
+            bucket_chunk_count[bucket_idx] += doc.num_chunks + doc.n_context_chunks
 
 
         return bucket_docs
@@ -1489,13 +1491,21 @@ class MSAEngine:
 
         documents: List[Document] = []
         kernel_sz = self.model_config.pooling_kernel_size
-        for idx, doc in enumerate(docs):  # idx 是 block 内部的 doc 索引
-            new_doc, doc_inputs = compose_input(doc, idx, self.tokenizer)
-            length = len(doc_inputs["input_ids"])
-            num_chunks = (length + kernel_sz - 1) // kernel_sz
-            # print(f"doc {idx} str {len(doc)} id length: {length}, num_chunks: {num_chunks}")
-
-            documents.append(Document(doc=doc, doc_id=idx, num_chunks=num_chunks))
+        for idx, item in enumerate(docs):
+            if isinstance(item, tuple):
+                context_str, doc_str = item
+                # Context chunks: pad to multiple of kernel so boundaries are clean
+                ctx_ids = self.tokenizer(context_str, add_special_tokens=False)["input_ids"]
+                n_context_chunks = (len(ctx_ids) + kernel_sz - 1) // kernel_sz
+                _, doc_inputs = compose_input(doc_str, idx, self.tokenizer)
+                doc_num_chunks = (len(doc_inputs["input_ids"]) + kernel_sz - 1) // kernel_sz
+                documents.append(Document(doc=doc_str, doc_id=idx, num_chunks=doc_num_chunks,
+                                          context=context_str, n_context_chunks=n_context_chunks))
+            else:
+                _, doc_inputs = compose_input(item, idx, self.tokenizer)
+                length = len(doc_inputs["input_ids"])
+                num_chunks = (length + kernel_sz - 1) // kernel_sz
+                documents.append(Document(doc=item, doc_id=idx, num_chunks=num_chunks))
         
         return MSAEngine.balanced_bucket_partition(documents, self.generate_config.world)
 
@@ -1514,7 +1524,16 @@ class MSAEngine:
             with open(self.memory_config.memory_file_path, 'rb') as f:
                 reference_metas = pickle.load(f)
 
-            context_list = list(reference_metas)
+            if reference_metas and isinstance(reference_metas[0], list):
+                # list[list[str]]: [[context, doc1, doc2, ...], ...]
+                context_list = [
+                    (group[0], doc)
+                    for group in reference_metas
+                    for doc in group[1:]
+                ]
+            else:
+                # list[str]: [doc1, doc2, ...]
+                context_list = list(reference_metas)
 
         else:
             raise ValueError(f"Unsupported file format: {self.memory_config.memory_file_path}")

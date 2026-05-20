@@ -211,22 +211,35 @@ class PrefillStage1Worker(GpuWorker):
         for doc_idx, item in enumerate(block):
             doc_id, doc, pre_calculated_num_chunk = item.doc_id, item.doc, item.num_chunks
             new_doc, doc_inputs = compose_input(doc, doc_id, self.tokenizer)
-            # print(f"inference {doc_id+1}: {new_doc}")
             # 此处必须使用 1 起始的doc_idx，因为此 id 是用于生成 pool doc ID 的
             # 注意不可以使用doc_id，doc_id只能用于嵌入在语料中，使得 generate 时能生成出来，
             # 而pool doc ID的作用却是用于标注产生的 kv cache chunks 和文档的对应关系
             # 所以每次 stage1 的推理doc id 都是从 1 开始的
-            temp_doc_ids = [doc_idx+1] * len(doc_inputs["input_ids"])
             temp_doc_input_ids = doc_inputs["input_ids"]
             temp_doc_attention_mask = doc_inputs["attention_mask"]
             length = len(temp_doc_input_ids)
-            temp_position_ids = [i for i in range(length)]
 
-            chunk_size = (len(temp_doc_ids) + self.pooling_kernel_size - 1) // self.pooling_kernel_size
+            if item.context:
+                # Prepend context tokens with a negative doc_id so they participate in causal
+                # attention with the doc but are excluded from pooling (doc_ids > 0 gate).
+                # doc_id scheme: -(doc_idx + 3) so abs(id) - 2 == doc_idx + 1 == the paired doc's positive id.
+                ctx_inputs = self.tokenizer(item.context, add_special_tokens=False)
+                ctx_len = len(ctx_inputs["input_ids"])
+                ctx_doc_id = -(doc_idx + 3)
+                doc_ids.extend([ctx_doc_id] * ctx_len)
+                doc_input_ids.extend(ctx_inputs["input_ids"])
+                doc_attention_mask.extend(ctx_inputs["attention_mask"])
+                position_ids.extend(range(ctx_len))
+                doc_position_start = ctx_len
+            else:
+                doc_position_start = 0
+
+            temp_doc_ids = [doc_idx + 1] * length
+            temp_position_ids = [doc_position_start + i for i in range(length)]
+
+            chunk_size = (length + self.pooling_kernel_size - 1) // self.pooling_kernel_size
             chunk_sizes.append(chunk_size)
             assert chunk_size == pre_calculated_num_chunk, f"pre calculated chunk {pre_calculated_num_chunk} got {chunk_size}, doc str {len(doc)} id len {length}/{len(temp_doc_ids)}: [{doc_id}] <{doc}>"
-
-
 
             doc_ids.extend(temp_doc_ids)
             doc_input_ids.extend(temp_doc_input_ids)
